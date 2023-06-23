@@ -5,8 +5,6 @@ import sys
 import time
 import math
 
-print("Test ECMP for flowlet")
-
 # Run the test for 4 times
 for i in range(4):
     print("Test case {}".format(i+1))
