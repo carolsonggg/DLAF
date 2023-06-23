@@ -1,32 +1,3 @@
-Last login: Thu Jun  8 17:11:25 on ttys000
-
-The default interactive shell is now zsh.
-To update your account to use zsh, please run `chsh -s /bin/zsh`.
-For more details, please visit https://support.apple.com/kb/HT208050.
-carolyns-MBP:~ carolynsong$ ssh p4@localhost -p4444
-p4@localhost's password: 
-Welcome to Ubuntu 18.04.6 LTS (GNU/Linux 5.4.0-144-generic x86_64)
-
- * Documentation:  https://help.ubuntu.com
- * Management:     https://landscape.canonical.com
- * Support:        https://ubuntu.com/advantage
-
-23 updates can be applied immediately.
-To see these additional updates run: apt list --upgradable
-
-Your Hardware Enablement Stack (HWE) is supported until April 2023.
-*** System restart required ***
-Last login: Thu Jun  8 10:12:18 2023 from 10.0.2.2
-p4@ubuntu:~$ cd cs145-23-project3
-p4@ubuntu:~/cs145-23-project3$ ls
-apps        log                p4src           README.md     test_scripts
-controller  logs               pcap            report        topology
-figures     p4_explanation.md  pull_update.sh  tcpdump_logs  topology.json
-p4@ubuntu:~/cs145-23-project3$ cd p4src/
-p4@ubuntu:~/cs145-23-project3/p4src$ ls
-l2fwd.p4  l3fwd.json  l3fwd.p4  l3fwd.p4i
-p4@ubuntu:~/cs145-23-project3/p4src$ less l3fwd.p4
-
 /*
 
 Summary: this module does L3 forwarding. For more info on this module, read the project README.
@@ -39,9 +10,7 @@ Summary: this module does L3 forwarding. For more info on this module, read the 
 
 /*
 
-Summary: The following section defines the protocol headers used by packets. These include the IPv4, TCP, and Ethernet headers. A header declaration in P4 includes all the field names (in order) together with the size
- (in bits) of each field. Metadata is similar to a header but only holds meaning during switch processing. It is only part of the packet while the packet is in the switch pipeline and is removed when the packet exits 
-the switch.
+Summary: The following section defines the protocol headers used by packets. These include the IPv4, TCP, and Ethernet headers. A header declaration in P4 includes all the field names (in order) together with the size (in bits) of each field. Metadata is similar to a header but only holds meaning during switch processing. It is only part of the packet while the packet is in the switch pipeline and is removed when the packet exits the switch.
 
 */
 
@@ -90,4 +59,195 @@ header tcp_t{
     bit<1>  ece;
     bit<1>  urg;
     bit<1>  ack;
-:
+    bit<1>  psh;
+    bit<1>  rst;
+    bit<1>  syn;
+    bit<1>  fin;
+    bit<16> window;
+    bit<16> checksum;
+    bit<16> urgentPtr;
+}
+
+struct headers {
+    ethernet_t   ethernet;
+    ipv4_t       ipv4;
+    tcp_t        tcp;
+}
+
+struct metadata {
+    bit<16> hash_res;
+    bit<14> ecmp_group_id;
+}
+
+
+/*
+
+Summary: the following section defines logic required to parse a packet's headers. Packets need to be parsed in the same order they are added to a packet. See headers.p4 to see header declarations. Deparsing can be thought of as stitching the headers back into the packet before it leaves the switch. Headers need to be deparsed in the same order they were parsed.
+
+*/
+
+/*************************************************************************
+*********************** P A R S E R  *******************************
+*************************************************************************/
+
+parser MyParser(packet_in packet,
+                out headers hdr,
+                inout metadata meta,
+                inout standard_metadata_t standard_metadata) {
+
+     state start {
+        packet.extract(hdr.ethernet);
+        transition select(hdr.ethernet.etherType) {
+            0x800: parse_ipv4;
+            default: accept;
+        
+	}
+
+    }
+
+    state parse_ipv4 {
+        packet.extract(hdr.ipv4);
+        transition select(hdr.ipv4.protocol){
+	    0x6: parse_tcp; 
+      	    default: accept;
+   	 }
+    }
+
+    state parse_tcp{
+	packet.extract(hdr.tcp);
+        transition accept;
+    }
+}
+
+/*************************************************************************
+***********************  D E P A R S E R  *******************************
+*************************************************************************/
+
+control MyDeparser(packet_out packet, in headers hdr) {
+    apply {
+        // TODO: Deparse the ethernet, ipv4 and tcp headers
+        packet.emit(hdr.ethernet);
+        packet.emit(hdr.ipv4); 
+	packet.emit(hdr.tcp);  
+    }
+}
+
+
+/*************************************************************************
+************   C H E C K S U M    V E R I F I C A T I O N   *************
+*************************************************************************/
+
+control MyVerifyChecksum(inout headers hdr, inout metadata meta) {
+    apply {  } 
+}
+
+
+/*************************************************************************
+**************  I N G R E S S   P R O C E S S I N G   *******************
+*************************************************************************/
+
+control MyIngress(inout headers hdr,
+                  inout metadata meta,
+                  inout standard_metadata_t standard_metadata) {
+   
+    action set_nhop(egressSpec_t port) {
+        standard_metadata.egress_spec = port;   
+    }
+    action drop() { 
+	 mark_to_drop(standard_metadata);
+    }
+
+    action ecmp_group(bit<14> ecmp_group_id, bit<16> num_nhops){
+        hash(meta.hash_res, HashAlgorithm.crc16, (bit<1>)0, {hdr.ipv4.srcAddr, hdr.ipv4.dstAddr, hdr.ipv4.protocol, hdr.tcp.srcPort, hdr.tcp.dstPort}, num_nhops); 
+        meta.ecmp_group_id = ecmp_group_id;
+    }
+
+    table ipv4_lpm {
+        //TODO: define the ip forwarding table
+        key = {
+            hdr.ipv4.dstAddr: lpm;
+        }
+        actions = {
+            ecmp_group;
+            set_nhop;
+            drop;
+            NoAction;
+        }
+        size = 256;
+        default_action = NoAction;
+    }
+    
+    table ecmp_group_to_nhop {
+    key = {
+        meta.ecmp_group_id: exact;
+        meta.hash_res: exact;
+    }
+    actions = {
+        set_nhop;
+        drop;
+        NoAction;
+    }
+    size = 256;
+    default_action = drop();
+      
+    }
+
+    apply {
+        switch (ipv4_lpm.apply().action_run) {
+            ecmp_group: {
+                ecmp_group_to_nhop.apply();
+            }
+            default: {
+            }
+        }
+    } 
+}
+
+/*************************************************************************
+****************  E G R E S S   P R O C E S S I N G   *******************
+*************************************************************************/
+
+control MyEgress(inout headers hdr,
+                 inout metadata meta,
+                 inout standard_metadata_t standard_metadata) {
+    apply {  }
+}
+
+/*************************************************************************
+*************   C H E C K S U M    C O M P U T A T I O N   **************
+*************************************************************************/
+
+control MyComputeChecksum(inout headers hdr, inout metadata meta) {
+    apply {
+    update_checksum(
+	    hdr.ipv4.isValid(),
+            { hdr.ipv4.version,
+	          hdr.ipv4.ihl,
+              hdr.ipv4.dscp,
+              hdr.ipv4.ecn,
+              hdr.ipv4.totalLen,
+              hdr.ipv4.identification,
+              hdr.ipv4.flags,
+              hdr.ipv4.fragOffset,
+              hdr.ipv4.ttl,
+              hdr.ipv4.protocol,
+              hdr.ipv4.srcAddr,
+              hdr.ipv4.dstAddr },
+              hdr.ipv4.hdrChecksum,
+              HashAlgorithm.csum16);    
+    }
+}
+
+/*************************************************************************
+***********************  S W I T C H  *******************************
+*************************************************************************/
+
+//switch architecture
+V1Switch(
+MyParser(),
+MyVerifyChecksum(),
+MyIngress(),
+MyEgress(),
+MyComputeChecksum(),
+MyDeparser()
+) main;
