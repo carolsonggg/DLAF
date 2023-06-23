@@ -163,7 +163,6 @@ control MyIngress(inout headers hdr,
     }
 
     table ipv4_lpm {
-        //TODO: define the ip forwarding table
         key = {
             hdr.ipv4.dstAddr: lpm;
         }
